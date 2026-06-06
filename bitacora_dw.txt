@@ -1,0 +1,281 @@
+05.06.2026
+Desarrollo del Data Warehouse - Resumen de avances y decisiones tomadas
+1. Objetivo
+
+Se construyó un Data Warehouse sobre datos de contrataciones públicas utilizando archivos CSV de convocatorias y adjudicaciones.
+El objetivo fue poblar las dimensiones primero y posteriormente construir las tablas de hechos.
+
+2. Carga de dimensiones
+2.1 dim_fecha
+Objetivo
+
+Construir una dimensión temporal reutilizable para todas las tablas de hechos.
+Decisión de diseño
+Se generó una fila por cada fecha única encontrada en los datasets.
+Se utilizó:
+fecha_id = YYYYMMDD
+
+Ejemplo:
+2020-01-02 → 20200102
+
+Resultado
+4018 registros cargados correctamente.
+
+2.2 dim_organismo
+Fuente
+
+convocatorias-2020.csv
+
+Campos utilizados
+Nro SAF
+Descripcion SAF
+Nro UOC
+Descripcion UOC
+Decisión de diseño
+
+Inicialmente se asumió que la combinación:
+(Nro SAF, Nro UOC)
+identificaba un organismo.
+Posteriormente se descubrió que esta hipótesis era incorrecta.
+
+Ejemplo:
+SAF 107
+UOC 74
+
+corresponde a decenas de organismos distintos:
+
+Administración Central
+Parque Nacional Nahuel Huapi
+Parque Nacional Iguazú
+Parque Nacional Lanín
+etc.
+
+Por lo tanto:
+(Nro SAF, Nro UOC)
+NO es una clave de negocio válida.
+La verdadera granularidad del organismo incluye:
+(Nro SAF, Nro UOC, Descripcion UOC)
+
+Resultado
+415 registros cargados.
+
+2.3 dim_procedimiento
+Fuente
+
+convocatorias-2020.csv
+
+Campos utilizados
+Número Procedimiento
+Nombre del Procedimiento
+Objeto del Procedimiento
+Ejercicio
+Modalidad
+Tipo de Procedimiento
+Verificación
+
+Se comparó:
+
+cantidad de procedimientos únicos detectados en Python
+cantidad de filas almacenadas en PostgreSQL
+
+Ambos valores coincidieron.
+
+Resultado
+13549 procedimientos cargados.
+
+2.4 dim_rubro
+Fuente
+
+adjudicaciones-2020.csv
+Problema encontrado
+La columna Rubros no contenía un único valor.
+
+Ejemplo:
+ALIMENTOS;ALQUILER;
+o
+INFORMATICA;LIBRERIA PAP. Y UTILES OFICINA;
+Es decir, múltiples rubros en una sola celda separados por ";".
+
+Decisión de diseño
+Se decidió:
+dividir cada registro utilizando split(";")
+eliminar valores vacíos
+generar una fila por rubro individual
+
+Ejemplo:
+ALIMENTOS;ALQUILER;
+se transforma en:
+
+ALIMENTOS
+ALQUILER
+
+Resultado
+49 rubros únicos cargados.
+
+2.5 dim_proveedor
+Fuente
+
+adjudicaciones-2020.csv
+
+Campos utilizados
+CUIT
+Descripción Proveedor
+Problema encontrado
+
+El ETL falló por restricción única:
+
+duplicate key value violates unique constraint dim_proveedor_cuit_key
+
+Investigación realizada
+
+Se detectó que algunos CUIT aparecían con distintas variantes de escritura de la razón social.
+
+Ejemplos:
+
+Digital Color Group SA.
+Digital Color Group SA
+
+LYME S A
+LYME S.A.
+
+PUCARA SOLUCIONES SA
+PUCARA SOLUCIONES S.A.
+
+Decisión de diseño
+
+Se determinó que:
+
+El CUIT es la clave de negocio.
+La razón social es un atributo descriptivo.
+
+Por lo tanto:
+Se agrupó por CUIT y se conservó una única razón social.
+Implementación:
+groupby("cuit").first()
+Resultado
+4475 proveedores únicos cargados.
+
+3. Verificaciones realizadas
+
+Para cada dimensión se verificó:
+
+Cantidad de registros generados por Python.
+Cantidad de registros almacenados en PostgreSQL.
+Ausencia de errores de integridad referencial.
+Ausencia de valores nulos relevantes.
+
+4. Desarrollo de fact_convocatoria
+Estructura
+
+fact_convocatoria
+
+fact_convocatoria_id
+procedimiento_id
+organismo_id
+fecha_publicacion_id
+monto_estimado
+etapa
+tipo_operacion
+Foreign Keys verificadas
+procedimiento_id → dim_procedimiento
+organismo_id → dim_organismo
+fecha_publicacion_id → dim_fecha
+
+También se verificó que:
+fact_convocatoria_id
+es autogenerado mediante secuencia PostgreSQL.
+Por lo tanto no debe cargarse desde Python.
+
+5. Problema de fechas
+
+La columna:
+Fecha de Publicación
+posee formato:
+02/01/2020 08:00:00 a.m.
+y
+02/01/2020 12:00:00 p.m.
+La conversión inicial con:
+pd.to_datetime(...)
+produjo errores.
+
+Solución
+
+Se utilizó:
+pd.to_datetime(
+columna,
+format="mixed",
+dayfirst=True
+)
+
+Posteriormente:
+fecha_publicacion_id = YYYYMMDD
+mediante:
+dt.strftime("%Y%m%d")
+
+6. Problema de multiplicación de filas
+Primer intento
+
+Se realizó el join utilizando:
+(Nro SAF, Nro UOC)
+
+Resultado:
+13549 registros CSV
+370956 registros luego del merge
+Esto evidenció una explosión de filas.
+Investigación
+
+Se verificó:
+SELECT nro_saf, nro_uoc, COUNT(*)
+sobre dim_organismo.
+Se descubrió que existen múltiples organismos para una misma combinación:
+(Nro SAF, Nro UOC)
+Segundo intento
+
+Se incorporó:
+Descripcion UOC
+al join.
+
+Join utilizado:
+(Nro SAF, Nro UOC, Descripcion UOC)
+
+Resultado:
+13549 registros CSV
+14630 registros luego del merge
+
+La situación mejoró considerablemente pero todavía existen filas duplicadas.
+
+7. Estado actual
+
+Dimensiones completadas:
+dim_fecha
+dim_organismo
+dim_procedimiento
+dim_rubro
+dim_proveedor
+
+Fact en desarrollo:
+fact_convocatoria
+
+Estado de fact_convocatoria:
+Lectura del CSV funcionando.
+Conversión de fechas funcionando.
+Obtención de fecha_publicacion_id funcionando.
+Foreign keys verificadas.
+Persisten duplicados durante el join con dim_organismo.
+Se está investigando la causa exacta de dichas duplicaciones antes de habilitar la carga definitiva.
+
+La tabla fact_convocatoria todavía NO fue cargada para evitar introducir datos incorrectos en el Data Warehouse.
+
+
+PRÓXIMOS PASOS
+
+1. Resolver duplicados en dim_organismo.
+   - El merge usando (Nro SAF, Nro UOC) genera 370956 filas.
+   - El merge usando (Nro SAF, Nro UOC, Descripcion UOC) genera 14630 filas.
+   - El CSV tiene 13549 registros.
+   - Aún existen 1081 filas extra.
+   - Investigar duplicados exactos en dim_organismo.
+2. Completar ETL de fact_convocatoria.
+3. Diseñar y cargar fact_adjudicacion.
+4. Validar integridad referencial de todo el DW.
+5. Construir consultas analíticas y dashboard final.
