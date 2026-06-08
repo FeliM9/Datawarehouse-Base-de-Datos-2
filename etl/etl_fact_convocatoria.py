@@ -47,28 +47,18 @@ df["fecha_publicacion_id"] = (
     .astype(int)
 )
 
+'''
 print(df["fecha_publicacion"].head())
-print(df["fecha_publicacion_id"].head())
+print(df["fecha_publicacion_id"].head())'''
 
 # -----------------------
 # Traer dim_organismo
 # -----------------------
-
-'''
-dim_org = pd.read_sql(
-    """
-    SELECT
-        organismo_id,
-        nro_saf,
-        nro_uoc
-    FROM dw.dim_organismo
-    """,
-    engine
-)'''
 dim_org = pd.read_sql("""
 SELECT
     organismo_id,
     nro_saf,
+    descripcion_saf,
     nro_uoc,
     descripcion_uoc
 FROM dw.dim_organismo
@@ -77,27 +67,17 @@ FROM dw.dim_organismo
 # -----------------------
 # Join organismo
 # -----------------------
-'''
-df = df.merge(
-    dim_org,
-    left_on=["Nro SAF", "Nro UOC"],
-    right_on=["nro_saf", "nro_uoc"],
-    how="left"
-)
-
-print(
-    "Organismos sin match:",
-    df["organismo_id"].isna().sum()
-)'''
 df = df.merge(
     dim_org,
     left_on=[
         "Nro SAF",
+        "Descripcion SAF",
         "Nro UOC",
         "Descripcion UOC"
     ],
     right_on=[
         "nro_saf",
+        "descripcion_saf",
         "nro_uoc",
         "descripcion_uoc"
     ],
@@ -105,6 +85,36 @@ df = df.merge(
 )
 print("Filas luego del merge:", len(df))
 print("Organismos sin match:", df["organismo_id"].isna().sum())
+
+'''CODIGO DE DIAGNOSTICO
+print("\nTOP procedimientos duplicados:")
+conteo = (
+    df.groupby("Número Procedimiento")
+      .size()
+      .sort_values(ascending=False)
+)
+print(conteo.head(30))
+
+
+duplicados = df[
+    df.duplicated(
+        subset=["Número Procedimiento"],
+        keep=False
+    )
+]
+print("\nCantidad filas duplicadas:", len(duplicados))
+print(
+    duplicados[
+        [
+            "Número Procedimiento",
+            "Nro SAF",
+            "Nro UOC",
+            "Descripcion UOC",
+            "organismo_id"
+        ]
+    ]
+    .head(50)
+)'''
 
 # -----------------------
 # Fact final
@@ -121,11 +131,23 @@ fact["tipo_operacion"] = df["Tipo de Operación"]
 
 print("Registros fact:", len(fact))
 
+
+
+
+# -----------------------
+# ELIMINADO DE REGISTROS EXISTENES ANTES DE CARGAR. SOLO EN FASE DESARROLLO. DESPUES ELIMINAR
+# -----------------------
+from sqlalchemy import text
+
+with engine.begin() as conn:
+    conn.execute(
+        text("TRUNCATE TABLE dw.fact_convocatoria")
+    )
+
+
 # -----------------------
 # Carga
 # -----------------------
-
-'''
 fact.to_sql(
     "fact_convocatoria",
     engine,
@@ -134,4 +156,4 @@ fact.to_sql(
     index=False
 )
 
-print("Carga finalizada.")'''
+print("Carga finalizada.")
