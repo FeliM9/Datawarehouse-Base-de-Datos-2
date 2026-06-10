@@ -86,35 +86,6 @@ df = df.merge(
 print("Filas luego del merge:", len(df))
 print("Organismos sin match:", df["organismo_id"].isna().sum())
 
-'''CODIGO DE DIAGNOSTICO
-print("\nTOP procedimientos duplicados:")
-conteo = (
-    df.groupby("Número Procedimiento")
-      .size()
-      .sort_values(ascending=False)
-)
-print(conteo.head(30))
-
-
-duplicados = df[
-    df.duplicated(
-        subset=["Número Procedimiento"],
-        keep=False
-    )
-]
-print("\nCantidad filas duplicadas:", len(duplicados))
-print(
-    duplicados[
-        [
-            "Número Procedimiento",
-            "Nro SAF",
-            "Nro UOC",
-            "Descripcion UOC",
-            "organismo_id"
-        ]
-    ]
-    .head(50)
-)'''
 
 # -----------------------
 # Fact final

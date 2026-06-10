@@ -533,7 +533,7 @@ print(
     ].nunique()
 )'''
 
-
+'''
 import pandas as pd
 
 df = pd.read_csv(
@@ -550,4 +550,35 @@ print(
             "Fecha de Adjudicación"
         ]
     ]
-)
+)'''
+
+
+''''
+print("ADJUDICACIONES:")
+import pandas as pd
+sheet_id = "12xT8rHIfRv8BPIG7iTArgD0mztNwZU3GN5Ap66_3sDk"
+url = f"https://docs.google.com/spreadsheets/d/{sheet_id}/export?format=csv"
+df = pd.read_csv(url)
+print(df.head())
+print(df.shape)
+
+print("CONVOCATORIAS:")
+import pandas as pd
+sheet_id = "16OULzb0pizK5PXbYXc3tZDm_JfCJwoNIf-K4YuxLYyk"
+url = f"https://docs.google.com/spreadsheets/d/{sheet_id}/export?format=csv"
+df = pd.read_csv(url)
+print(df.head())
+print(df.shape)'''
+
+
+
+import pandas as pd
+import hashlib
+#sheet_id = "12xT8rHIfRv8BPIG7iTArgD0mztNwZU3GN5Ap66_3sDk"
+sheet_id = "16OULzb0pizK5PXbYXc3tZDm_JfCJwoNIf-K4YuxLYyk"
+url = f"https://docs.google.com/spreadsheets/d/{sheet_id}/export?format=csv"
+df = pd.read_csv(url)
+contenido = df.to_csv(index=False)
+hash_actual = hashlib.md5(contenido.encode("utf-8")).hexdigest()
+print(hash_actual)
+
