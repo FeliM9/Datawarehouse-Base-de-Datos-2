@@ -1,13 +1,9 @@
 name: DW Pipeline
 
-#
-#on:
-#  schedule:
-#    - cron: "*/5 * * * *"
-#
-#  workflow_dispatch:
-
 on:
+  schedule:
+    - cron: "*/5 * * * *"
+
   workflow_dispatch:
 
 jobs:
