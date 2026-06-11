@@ -1,0 +1,12 @@
+.env
+
+__pycache__/
+*.pyc
+
+.venv/
+venv/
+
+# Logs de Dagster (se mantiene la carpeta via .gitkeep, no los .log)
+Dagster Logs/*.log
+dagster_home/
+.tmp_dagster_home/

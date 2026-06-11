@@ -1,0 +1,6 @@
+# Permite ejecutar simplemente `dagster dev` desde la raíz del proyecto.
+# Dagster busca este archivo automáticamente y carga las definiciones.
+load_from:
+  - python_file:
+      relative_path: orchestration/definitions.py
+      working_directory: .

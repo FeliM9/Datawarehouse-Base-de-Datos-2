@@ -1,0 +1,427 @@
+06.06.2026
+Desarrollo del Data Warehouse - Resumen de avances y decisiones tomadas
+1. Objetivo
+
+Se construyó un Data Warehouse sobre datos de contrataciones públicas utilizando archivos CSV de convocatorias y adjudicaciones.
+El objetivo fue poblar las dimensiones primero y posteriormente construir las tablas de hechos.
+
+2. Carga de dimensiones
+2.1 dim_fecha
+Objetivo
+
+Construir una dimensión temporal reutilizable para todas las tablas de hechos.
+Decisión de diseño
+Se generó una fila por cada fecha única encontrada en los datasets.
+Se utilizó:
+fecha_id = YYYYMMDD
+
+Ejemplo:
+2020-01-02 → 20200102
+
+Resultado
+4018 registros cargados correctamente.
+
+2.2 dim_organismo
+Fuente
+
+convocatorias-2020.csv
+
+Campos utilizados
+Nro SAF
+Descripcion SAF
+Nro UOC
+Descripcion UOC
+Decisión de diseño
+
+Inicialmente se asumió que la combinación:
+(Nro SAF, Nro UOC)
+identificaba un organismo.
+Posteriormente se descubrió que esta hipótesis era incorrecta.
+
+Ejemplo:
+SAF 107
+UOC 74
+
+corresponde a decenas de organismos distintos:
+
+Administración Central
+Parque Nacional Nahuel Huapi
+Parque Nacional Iguazú
+Parque Nacional Lanín
+etc.
+
+Por lo tanto:
+(Nro SAF, Nro UOC)
+NO es una clave de negocio válida.
+La verdadera granularidad del organismo incluye:
+(Nro SAF, Nro UOC, Descripcion UOC)
+
+Resultado
+415 registros cargados.
+
+2.3 dim_procedimiento
+Fuente
+
+convocatorias-2020.csv
+
+Campos utilizados
+Número Procedimiento
+Nombre del Procedimiento
+Objeto del Procedimiento
+Ejercicio
+Modalidad
+Tipo de Procedimiento
+Verificación
+
+Se comparó:
+
+cantidad de procedimientos únicos detectados en Python
+cantidad de filas almacenadas en PostgreSQL
+
+Ambos valores coincidieron.
+
+Resultado
+13549 procedimientos cargados.
+
+2.4 dim_rubro
+Fuente
+
+adjudicaciones-2020.csv
+Problema encontrado
+La columna Rubros no contenía un único valor.
+
+Ejemplo:
+ALIMENTOS;ALQUILER;
+o
+INFORMATICA;LIBRERIA PAP. Y UTILES OFICINA;
+Es decir, múltiples rubros en una sola celda separados por ";".
+
+Decisión de diseño
+Se decidió:
+dividir cada registro utilizando split(";")
+eliminar valores vacíos
+generar una fila por rubro individual
+
+Ejemplo:
+ALIMENTOS;ALQUILER;
+se transforma en:
+
+ALIMENTOS
+ALQUILER
+
+Resultado
+49 rubros únicos cargados.
+
+2.5 dim_proveedor
+Fuente
+
+adjudicaciones-2020.csv
+
+Campos utilizados
+CUIT
+Descripción Proveedor
+Problema encontrado
+
+El ETL falló por restricción única:
+
+duplicate key value violates unique constraint dim_proveedor_cuit_key
+
+Investigación realizada
+
+Se detectó que algunos CUIT aparecían con distintas variantes de escritura de la razón social.
+
+Ejemplos:
+
+Digital Color Group SA.
+Digital Color Group SA
+
+LYME S A
+LYME S.A.
+
+PUCARA SOLUCIONES SA
+PUCARA SOLUCIONES S.A.
+
+Decisión de diseño
+
+Se determinó que:
+
+El CUIT es la clave de negocio.
+La razón social es un atributo descriptivo.
+
+Por lo tanto:
+Se agrupó por CUIT y se conservó una única razón social.
+Implementación:
+groupby("cuit").first()
+Resultado
+4475 proveedores únicos cargados.
+
+3. Verificaciones realizadas
+
+Para cada dimensión se verificó:
+
+Cantidad de registros generados por Python.
+Cantidad de registros almacenados en PostgreSQL.
+Ausencia de errores de integridad referencial.
+Ausencia de valores nulos relevantes.
+
+4. Desarrollo de fact_convocatoria
+Estructura
+
+fact_convocatoria
+
+fact_convocatoria_id
+procedimiento_id
+organismo_id
+fecha_publicacion_id
+monto_estimado
+etapa
+tipo_operacion
+Foreign Keys verificadas
+procedimiento_id → dim_procedimiento
+organismo_id → dim_organismo
+fecha_publicacion_id → dim_fecha
+
+También se verificó que:
+fact_convocatoria_id
+es autogenerado mediante secuencia PostgreSQL.
+Por lo tanto no debe cargarse desde Python.
+
+5. Problema de fechas
+
+La columna:
+Fecha de Publicación
+posee formato:
+02/01/2020 08:00:00 a.m.
+y
+02/01/2020 12:00:00 p.m.
+La conversión inicial con:
+pd.to_datetime(...)
+produjo errores.
+
+Solución
+
+Se utilizó:
+pd.to_datetime(
+columna,
+format="mixed",
+dayfirst=True
+)
+
+Posteriormente:
+fecha_publicacion_id = YYYYMMDD
+mediante:
+dt.strftime("%Y%m%d")
+
+6. Problema de multiplicación de filas
+Primer intento
+
+Se realizó el join utilizando:
+(Nro SAF, Nro UOC)
+
+Resultado:
+13549 registros CSV
+370956 registros luego del merge
+Esto evidenció una explosión de filas.
+Investigación
+
+Se verificó:
+SELECT nro_saf, nro_uoc, COUNT(*)
+sobre dim_organismo.
+Se descubrió que existen múltiples organismos para una misma combinación:
+(Nro SAF, Nro UOC)
+Segundo intento
+
+Se incorporó:
+Descripcion UOC
+al join.
+
+Join utilizado:
+(Nro SAF, Nro UOC, Descripcion UOC)
+
+Resultado:
+13549 registros CSV
+14630 registros luego del merge
+
+La situación mejoró considerablemente pero todavía existen filas duplicadas.
+
+7. Estado actual
+
+Dimensiones completadas:
+dim_fecha
+dim_organismo
+dim_procedimiento
+dim_rubro
+dim_proveedor
+
+Fact en desarrollo:
+fact_convocatoria
+
+Estado de fact_convocatoria:
+Lectura del CSV funcionando.
+Conversión de fechas funcionando.
+Obtención de fecha_publicacion_id funcionando.
+Foreign keys verificadas.
+Persisten duplicados durante el join con dim_organismo.
+Se está investigando la causa exacta de dichas duplicaciones antes de habilitar la carga definitiva.
+
+La tabla fact_convocatoria todavía NO fue cargada para evitar introducir datos incorrectos en el Data Warehouse.
+
+
+PRÓXIMOS PASOS
+
+1. Resolver duplicados en dim_organismo.
+   - El merge usando (Nro SAF, Nro UOC) genera 370956 filas.
+   - El merge usando (Nro SAF, Nro UOC, Descripcion UOC) genera 14630 filas.
+   - El CSV tiene 13549 registros.
+   - Aún existen 1081 filas extra.
+   - Investigar duplicados exactos en dim_organismo.
+2. Completar ETL de fact_convocatoria.
+3. Diseñar y cargar fact_adjudicacion.
+4. Validar integridad referencial de todo el DW.
+5. Construir consultas analíticas y dashboard final.
+
+
+========================================================================
+10.06.2026
+Orquestación con Dagster, logging, conexión a Neon y carga completa del DW
+========================================================================
+
+1. Orquestación (Dagster)
+Se eligió Dagster como orquestador del ETL.
+Se creó orchestration/definitions.py: cada script de etl/ y automation/ se
+"envuelve" como un asset de Dagster que lo ejecuta como subproceso desde la
+raíz del proyecto (no se reescribió la lógica de los scripts).
+Las dependencias entre assets reproducen el modelo estrella:
+    sincronizar_fuentes -> reset_dw -> dimensiones -> hechos -> bridge -> control
+Componentes:
+- Job rebuild_dw_job: reconstruye el DW completo.
+- Schedule rebuild_diario: 06:00 todos los días (apagado por defecto).
+- Sensor sensor_cambio_en_fuentes: reemplaza a check_changes.py; compara el
+  hash de cada Google Sheet contra dw.etl_control y dispara el rebuild si hay
+  cambios (apagado por defecto, se enciende desde la UI).
+- workspace.yaml para arrancar con "dagster dev".
+- Documentación: docs/orquestacion_dagster.md.
+
+2. Logging
+Cada paso del ETL escribe su salida en la carpeta "Dagster Logs/":
+- AAAAMMDD_HHMMSS_<script>.log : stdout, stderr y código de salida del paso.
+- etl.log : log maestro con una línea por paso (OK / FALLO).
+
+3. Fuente de datos (aclaración)
+Origen real: 2 Google Sheets (IDs en automation/download_sources.py, dict SHEETS).
+- automation/download_sources.py las descarga como CSV a data/raw/.
+- Los scripts ETL leen de data/raw/*.csv (copia local descargada).
+- sincronizar_fuentes redescarga las Sheets en cada rebuild.
+Hoy el flujo es: Google Sheets (online) -> CSV local en data/raw/ -> Neon.
+Todavía NO se usa Google Drive; ese es un paso futuro (disparo por webhook).
+
+4. Problema encontrado: conexión a Neon (.env faltante)
+El primer run de Dagster falló en el paso reset_dw con:
+    ValueError: invalid literal for int() with base 10: 'None'
+Causa: no existía el archivo .env, por lo que DB_USER/DB_PASSWORD/DB_HOST/
+DB_PORT/DB_NAME valían None y la URL de conexión quedaba inválida
+(postgresql+psycopg2://None:None@None:None/None). sincronizar_fuentes pasó
+porque no usa la base; reset_dw fue el primer paso en tocar Neon.
+Solución:
+a) Se creó .env.example como plantilla (copiar a .env y completar con los datos
+   de Neon -> Connection Details).
+b) Se agregó un chequeo previo (_verificar_env) que falla con un mensaje claro
+   indicando qué variables faltan, en vez del error críptico.
+
+5. Carga completa exitosa (run 10.06.2026 21:16)
+Tras crear el .env, todos los pasos terminaron en OK. Conteos cargados en Neon
+(esquema dw):
+- dim_fecha                 : 4018
+- dim_procedimiento         : 13550 (+ 2159 completados por el paso de faltantes)
+- fact_convocatoria         : 13550  (merge 13550 = 13550, organismos sin match: 0)
+- fact_adjudicacion         : 22278  (de 22281 originales, 3 filtradas)
+- bridge_adjudicacion_rubro : 66909  (explode de las 22278 adjudicaciones)
+
+6. Problema de duplicados en fact_convocatoria: RESUELTO
+La bitácora previa reportaba explosión de filas (13549 -> 14630 / 370956).
+En esta corrida el join quedó 1:1: "Filas luego del merge: 13550",
+"Organismos sin match: 0", "Registros fact: 13550". Sin duplicados.
+
+NOTA OPERATIVA
+- "dagster dev" solo levanta la UI en http://localhost:3000. Para correr el ETL
+  hay que ir a Assets -> "Materialize all" (o ejecutar el job rebuild_dw_job).
+- Los datos quedan en el esquema dw de Neon (NO en public). Para verlos, en el
+  cliente SQL refrescar la conexión y mirar el esquema dw. Verificación rápida:
+      SELECT count(*) FROM dw.fact_adjudicacion;   -- debe dar 22278
+
+
+========================================================================
+10.06.2026 (cont.)
+Prueba del sensor y bug de PK duplicada en completar_procedimientos
+========================================================================
+
+Se activó el sensor sensor_cambio_en_fuentes y se agregó una fila a la Google
+Sheet de adjudicaciones para probar el disparo automático. El sensor detectó el
+cambio y lanzó el rebuild, pero el run FALLÓ en el paso completar_procedimientos.
+
+Error:
+    psycopg2.errors.UniqueViolation: duplicate key value violates unique
+    constraint "dim_procedimiento_pkey"
+    DETAIL: Key (procedimiento_id)=(84/17-1941-LPR19) already exists.
+
+Causa:
+etl_completar_procedimientos_faltantes.py arma los procedimientos faltantes y
+los dedupeaba por la combinación (Número Procedimiento, Modalidad, Tipo de
+Procedimiento). Un mismo procedimiento_id puede venir en adjudicaciones con
+distinta modalidad/tipo, por lo que drop_duplicates() dejaba DOS filas con el
+mismo procedimiento_id -> choque contra la clave primaria. La fila agregada
+introdujo justo ese caso (el run anterior no lo disparó porque esa combinación
+no existía todavía).
+
+Solución (en etl_completar_procedimientos_faltantes.py, antes del to_sql):
+- drop_duplicates(subset=["procedimiento_id"], keep="first")  -> 1 fila por id.
+- Excluir los procedimiento_id que ya existen en dim_procedimiento
+  (~isin(dim_proc["procedimiento_id"]))  -> paso idempotente ante rebuilds.
+
+Riesgo latente (pendiente):
+etl_dim_procedimiento.py usa el mismo patrón drop_duplicates() sobre todas las
+columnas. Si en el futuro una convocatoria trae un procedimiento_id repetido con
+distintos atributos, podría fallar igual. Conviene aplicarle el mismo
+subset=["procedimiento_id"] para blindar el rebuild ante cualquier edición.
+
+Cómo re-testear el sensor:
+El run fallido no llegó a registrar_control_hashes, así que dw.etl_control sigue
+con los hashes viejos y el sensor NO relanza el mismo cambio (run_key repetido).
+Para volver a probar: 1) "Materialize all" manual para confirmar el fix, o
+2) hacer una nueva edición chica en la planilla (hash nuevo -> run_key nuevo ->
+el sensor dispara un run limpio).
+
+Resultado: el sensor se probó con éxito (detecta el cambio y dispara el rebuild)
+y, tras el fix de completar_procedimientos, el rebuild completo queda en verde.
+
+
+========================================================================
+10.06.2026 (cont.)
+Capa de visualización: decisión Power BI (Import) y métricas
+========================================================================
+
+1. Decisión de diseño: Power BI en modo IMPORT (no DirectQuery)
+Requisito de la cátedra: que las métricas ya cargadas sigan disponibles aunque
+se caiga la conexión con el DW. Se resuelve usando Import: Power BI cachea una
+copia de los datos dentro del modelo (motor VertiPaq, persistida en el .pbix y
+en el dataset publicado). Si Neon se cae, los visuales siguen mostrando el
+último snapshot. DirectQuery NO sirve porque consulta en vivo y se rompe si la
+fuente está caída. El refresh (manual desde Desktop, o programado en el Service
+vía data gateway) actualiza el snapshot.
+
+2. Verificación de datos (no solo columnas, sino que existan)
+Como el sandbox no tiene salida de red a Neon, se verificó la FUENTE (CSV en
+data/raw) y se dejó SQL para confirmar en la base:
+- adjudicaciones-2020.csv: 22281 filas; Monto, CUIT (4475 distintos), Rubros,
+  Moneda (3 distintas) y Fecha de Adjudicación (22278 no nulos) poblados.
+- convocatorias-2020.csv: 13550 filas; Monto Estimado (13549), SAF/UOC, fechas,
+  etapa y modalidad poblados.
+- SQL de verificación en sql/queries/verificacion_dw.sql (conteos, no-nulos,
+  monto por moneda, e integridad referencial / huérfanos = deben dar 0).
+
+3. Métricas (medidas DAX)
+Documentadas en docs/metricas_powerbi.md: relaciones del modelo, caveat de
+monedas (no sumar monto sin filtrar; las medidas filtran "Peso Argentino"),
+caveat del bridge (sumar monto por rubro sobre-cuenta), y medidas de conteo,
+monto, participación/ranking, rubros, inteligencia temporal y desvío
+estimado vs adjudicado.
