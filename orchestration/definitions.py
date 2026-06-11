@@ -184,6 +184,10 @@ def _hash_sheet(sheet_id: str) -> str:
 # ===========================================================================
 
 # --- Mantenimiento ---------------------------------------------------------
+# Nota: el "gate" de no reconstruir si no cambio nada vive en el SENSOR
+# (sensor_cambio_en_fuentes), que saltea limpio (tick "Skipped", sin rojo y sin
+# tocar la base) cuando las fuentes no cambiaron. El rebuild MANUAL no tiene
+# gate: reconstruye siempre (es una accion intencional).
 @asset(
     group_name="mantenimiento",
     description="Descarga las Google Sheets a data/raw/ antes de reconstruir, "
@@ -214,7 +218,8 @@ def dim_organismo(context: AssetExecutionContext) -> None:
     run_script(context, "etl/etl_dim_organismo.py")
 
 
-@asset(deps=[reset_dw], group_name="dimensiones", description="dim_proveedor")
+@asset(deps=[reset_dw], group_name="dimensiones",
+       description="dim_proveedor (SCD Tipo 2: merge versionado, no se trunca)")
 def dim_proveedor(context: AssetExecutionContext) -> None:
     run_script(context, "etl/etl_dim_proveedor.py")
 
@@ -317,6 +322,16 @@ rebuild_dw_job = define_asset_job(
                 "hechos -> bridge -> control.",
 )
 
+# Rebuild forzado: mismo grafo, pensado para lanzarlo a mano desde la UI
+# (Jobs -> rebuild_forzado -> Launch Run) cuando querés reconstruir si o si
+# (por ejemplo para aplicar cambios que ya guardaste en las sheets). No tiene
+# gate; el "no reconstruir si no cambio nada" lo maneja el sensor.
+rebuild_forzado_job = define_asset_job(
+    name="rebuild_forzado",
+    selection=AssetSelection.all(),
+    description="Rebuild completo forzado (manual, sin gate).",
+)
+
 
 # ===========================================================================
 # SCHEDULE - rebuild diario (apagado por defecto)
@@ -389,7 +404,7 @@ defs = Definitions(
         bridge_adjudicacion_rubro,
         registrar_control_hashes,
     ],
-    jobs=[rebuild_dw_job],
+    jobs=[rebuild_dw_job, rebuild_forzado_job],
     schedules=[rebuild_diario_schedule],
     sensors=[sensor_cambio_en_fuentes],
 )

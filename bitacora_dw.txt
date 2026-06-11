@@ -425,3 +425,203 @@ monedas (no sumar monto sin filtrar; las medidas filtran "Peso Argentino"),
 caveat del bridge (sumar monto por rubro sobre-cuenta), y medidas de conteo,
 monto, participación/ranking, rubros, inteligencia temporal y desvío
 estimado vs adjudicado.
+
+
+========================================================================
+11.06.2026
+SCD Tipo 2 en dim_proveedor (rama etl-scd-proveedor)
+========================================================================
+
+Requisito de cátedra: al menos una tabla con Slowly Changing Dimension.
+Se eligió dim_proveedor con SCD Tipo 2 (clave de negocio estable = CUIT;
+atributo que cambia = razón social, ya documentado en esta bitácora que un
+mismo CUIT aparece con distintas grafías).
+
+Diseño:
+- proveedor_id (serial) = surrogate key -> sigue siendo la PRIMARY KEY.
+- cuit = business key -> deja de ser UNIQUE (varias versiones por CUIT).
+- Nuevas columnas: fecha_desde, fecha_hasta, es_vigente (SIN columna version).
+- Cada fact_adjudicacion apunta al proveedor_id de la versión VIGENTE del CUIT.
+
+Cambios implementados:
+1. DDL:
+   - sql/ddl/06_scd2_dim_proveedor.sql: migración (drop UNIQUE(cuit),
+     agrega fecha_desde/fecha_hasta/es_vigente, backfill de filas actuales,
+     índice parcial por cuit vigente). Incluye opción de re-seed limpio.
+   - sql/ddl/02_dimensions.sql: esquema canónico de dim_proveedor actualizado
+     (sin UNIQUE de cuit, con columnas SCD).
+2. automation/reset_dw.py: se sacó dim_proveedor del TRUNCATE. Es la única
+   tabla que NO se trunca, para que el historial sobreviva a cada rebuild.
+3. etl/etl_dim_proveedor.py: reescrito como MERGE versionado (antes era
+   truncate + append). Compara la fuente contra la versión vigente por CUIT:
+   CUIT nuevo -> versión 1; razón social distinta -> cierra la vigente e
+   inserta la nueva; igual -> no hace nada. Dedup determinístico de la fuente
+   (sort + groupby) para no generar versiones falsas por orden de filas.
+4. etl/etl_fact_adjudicacion.py: el lookup de dim_proveedor ahora filtra
+   es_vigente = true (cada CUIT mapea a una sola versión; el merge no explota).
+5. orchestration/definitions.py: descripción del asset dim_proveedor actualizada.
+6. docs/scd_dim_proveedor.md: diseño, pasos de deploy y cómo demostrar el
+   versionado (cambiar una razón social en el Sheet -> el sensor dispara el
+   rebuild -> el CUIT queda con 2 filas).
+
+Problema previsto y resuelto:
+- El rebuild completo (TRUNCATE) borraba la historia -> incompatible con SCD2.
+  Solución: carve-out de dim_proveedor del TRUNCATE + carga por merge.
+- Riesgo de versiones "ruido" por dedup no determinístico -> se ordena antes
+  del groupby; además se recomienda un re-seed limpio una sola vez al desplegar.
+
+Verificación:
+- Se simuló en pandas la lógica del merge (casos nuevo / cambio / sin cambio):
+  el cambio cierra la versión vieja (es_vigente=false, fecha_hasta) e inserta la
+  nueva; cada CUIT queda con UNA sola versión vigente (lookup de hechos 1:1);
+  el CUIT modificado queda con 2 filas (historia preservada). OK.
+
+Deploy (una vez): aplicar 06_scd2_dim_proveedor.sql, (recomendado) TRUNCATE
+dw.dim_proveedor RESTART IDENTITY CASCADE, y Materialize all.
+
+Problema en el primer intento: el paso dim_proveedor falló con
+"column es_vigente does not exist" porque se corrió el pipeline ANTES de aplicar
+la migración DDL. Solución: ejecutar 06_scd2_dim_proveedor.sql en Neon primero.
+
+
+------------------------------------------------------------------------
+11.06.2026 (cont.) - Gate de cambios en el pipeline
+------------------------------------------------------------------------
+Pedido: que un run no resetee/reconstruya si no hubo cambios en las fuentes
+(comparando hashes de las Google Sheets contra dw.etl_control), no solo el
+sensor sino también en runs manuales.
+
+Implementación: nuevo asset raíz verificar_cambios en orchestration/definitions.py.
+- Calcula el hash de cada Sheet y lo compara contra dw.etl_control.
+- Si NO hay cambios, lanza dagster.Failure y corta el rebuild ANTES del reset:
+  ningún paso posterior corre, las tablas no se tocan.
+- Si hay cambios, sigue normal (sincronizar -> reset -> ... -> registrar_control_hashes).
+- sincronizar_fuentes ahora depende de verificar_cambios (es la puerta de entrada).
+Nota de UX: un run "sin cambios" queda marcado como fallido pero con el mensaje
+"Sin cambios en las fuentes; no se reconstruye el DW" — es intencional, no es un
+error real. Si molesta para la defensa, se quita la dependencia y los runs
+manuales vuelven a reconstruir siempre (el sensor igual gatea los automáticos).
+Verificado con dagster.materialize: sin cambios -> Failure corta; con cambios -> sigue.
+
+
+------------------------------------------------------------------------
+11.06.2026 (cont.) - provincia con fuente real (nueva columna en el sheet)
+------------------------------------------------------------------------
+Antes 'provincia' no tenia origen (siempre NULL). Se agrega al sheet de
+adjudicaciones la columna 'Provincia Operativa Proveedor' (provincias asignadas
+manualmente por proveedor), para tener un segundo atributo versionable y
+demostrar el SCD2 con cambios de provincia.
+
+ETL (etl/etl_dim_proveedor.py):
+- Lee provincia de 'Provincia Operativa Proveedor' de forma defensiva (si la
+  columna no existe todavia, queda NULL y no se rompe).
+- provincia pasa a ser atributo versionado junto con razon_social.
+- Para cada CUIT se toma el estado de la adjudicacion MAS RECIENTE
+  (por Fecha de Adjudicacion). Asi, si un proveedor cambia de provincia "a
+  partir de" una fecha, sus filas nuevas son las mas recientes y gana la
+  provincia nueva -> el merge lo detecta como cambio y versiona.
+- Dedup deterministico (sort cuit/fecha/provincia/razon + drop_duplicates last).
+Verificado en pandas: cambio de provincia en filas recientes -> versiona; sin
+cambio -> no; CUIT nuevo -> version 1.
+
+Secuencia recomendada para una demo limpia:
+1. Agregar la columna y asignar una provincia por proveedor (misma en todas sus
+   filas por ahora).
+2. Re-seed: TRUNCATE dw.dim_proveedor RESTART IDENTITY CASCADE; TRUNCATE
+   dw.etl_control; y Materialize all -> version 1 ya trae la provincia (evita
+   versionar en masa por el paso NULL -> provincia).
+3. Cambiar la provincia de 10 proveedores en sus adjudicaciones recientes.
+4. Rebuild -> esos 10 quedan con 2 versiones (la vieja cerrada, la nueva vigente).
+Nota: la vigencia SCD (fecha_desde) es el momento del rebuild que detecta el
+cambio, no la fecha "X" del dato (SCD2 system-versioned).
+
+
+------------------------------------------------------------------------
+11.06.2026 (cont.) - Fuente real para provincia (dim_proveedor)
+------------------------------------------------------------------------
+Hallazgo: al cruzar los CSV contra el diagrama dimensional, provincia en
+dim_proveedor NO tenía fuente (ninguno de los dos sheets traía provincia /
+jurisdicción del proveedor), por lo que quedaba siempre NULL.
+(También se detectó que en el diagrama FACT_Adjudicacion tiene rubro_id como FK
+directa, pero la implementación usa el bridge bridge_adjudicacion_rubro porque
+la columna "Rubros" es multivaluada; el diagrama está desactualizado en eso.)
+
+Decisión: se agrega al sheet de adjudicaciones la columna
+"Provincia Operativa Proveedor" (provincias asignadas al azar por proveedor), y
+se cambian ~10 proveedores de provincia para probar el versionado SCD.
+
+Cambios en etl/etl_dim_proveedor.py:
+- provincia ahora se carga desde la columna "Provincia Operativa Proveedor"
+  (defensivo: si la columna no existe todavía, queda NULL y no rompe).
+- El dedup pasó a tomar el estado de la ADJUDICACIÓN MÁS RECIENTE por CUIT
+  (sort por Fecha de Adjudicación + drop_duplicates keep=last, con claves de
+  desempate para que sea determinístico). Así, si un proveedor cambia de
+  provincia en filas recientes, gana la provincia nueva y el merge versiona.
+- El merge ya comparaba provincia, así que un cambio de provincia genera una
+  nueva versión igual que un cambio de razón social.
+
+Verificación (pandas): proveedor con provincia nueva en su última adjudicación
+-> el representante queda con la provincia nueva -> el merge lo marca como
+cambio -> versión nueva. CUIT nuevo -> versión 1. Sin cambios -> nada. Sin la
+columna -> no rompe. OK.
+
+
+------------------------------------------------------------------------
+11.06.2026 (cont.) - SCD2 RECONSTRUIDO (effective-dated) + linkage as-was
+------------------------------------------------------------------------
+Problema con el enfoque "estado más reciente": al cambiar la provincia de UNA
+adjudicación intermedia de un CUIT (ej. 20-18053177-8, una fila en Tierra del
+Fuego el 05/11 entre adjudicaciones de San Luis), NO versionaba, porque el ETL
+solo miraba la adjudicación más reciente (que seguía en San Luis). El usuario
+quería que dim_proveedor refleje TODA la historia de cambios de provincia que ya
+está embebida en adjudicaciones-2020, sin volver al truncate por rebuild.
+
+Decisión: SCD2 RECONSTRUIDO desde el log (effective-dated).
+- etl/etl_dim_proveedor.py reescrito: por cada CUIT recorre sus adjudicaciones
+  ordenadas por fecha y crea una versión por cada "corrida" de (razon_social,
+  provincia) constante, con vigencia REAL (fecha_desde/fecha_hasta del dato).
+  Carga por UPSERT idempotente por (cuit, fecha_desde), SIN truncate:
+  versión nueva -> INSERT; versión existente con vigencia/atributos distintos ->
+  UPDATE; correr sin cambios -> no hace nada.
+- etl/etl_fact_adjudicacion.py: linkage AS-WAS. Cada adjudicación apunta a la
+  versión vigente EN SU FECHA (merge_asof backward por CUIT sobre fecha_desde),
+  no siempre a la vigente actual. Habilita métricas históricamente correctas
+  (ej. monto por provincia respeta la provincia de la época).
+- reset_dw.py: dim_proveedor sigue fuera del TRUNCATE (no-truncate ongoing).
+
+Resultado para 20-18053177-8: 3 versiones ->
+San Luis (03/02->05/11) | Tierra del Fuego (05/11->09/11) | San Luis (09/11->vig).
+
+Arranque (una sola vez): las filas viejas tenían fecha de carga, no real, así que
+hay que resetear dim_proveedor una vez:
+   TRUNCATE dw.dim_proveedor RESTART IDENTITY CASCADE;
+   TRUNCATE dw.etl_control;
+y después Materialize all. De ahí en más NO se trunca.
+
+Verificado en pandas: reconstrucción (3 versiones SL->TdF->SL), idempotencia
+(0 cambios al re-correr), cambio nuevo (1 insert + 1 update cerrando la versión
+previa) y merge_asof as-was (cada adjudicación mapea a su versión por fecha).
+
+
+------------------------------------------------------------------------
+11.06.2026 (cont.) - Gate movido al sensor (sin runs rojos) + rebuild forzado
+------------------------------------------------------------------------
+Problema: el asset verificar_cambios cortaba el rebuild con dagster.Failure, lo
+que dejaba runs en ROJO (errores falsos) cuando no había cambios. Un job solo
+puede cortarse a la mitad fallando, así que el gate dentro del job siempre iba a
+dar rojo.
+
+Cambio:
+- Se ELIMINÓ el asset verificar_cambios. El gateo "no reconstruir si no cambió
+  nada" queda únicamente en el SENSOR sensor_cambio_en_fuentes, que cuando no hay
+  cambios muestra el tick como "Skipped" (gris, sin rojo) y NO lanza run -> no se
+  toca la base. sincronizar_fuentes vuelve a ser asset raíz (sin dep del gate).
+- El rebuild MANUAL ya no tiene gate: reconstruye siempre (acción intencional).
+- Se agregó el job rebuild_forzado (define_asset_job, selection all). Se lanza a
+  mano desde la UI: Jobs -> rebuild_forzado -> Launch Run. Sirve para forzar la
+  reconstrucción (p. ej. aplicar cambios ya guardados en las sheets) sin esperar
+  al sensor.
+
+Resultado: el sensor gatea lo automático sin rojos ni tocar la base; el rebuild
+manual/forzado reconstruye siempre. Para que tome los cambios hay que recargar la
+code location en Dagster (botón Reload o reiniciar dagster dev).

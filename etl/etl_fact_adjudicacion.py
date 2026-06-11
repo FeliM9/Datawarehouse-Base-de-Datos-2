@@ -62,25 +62,37 @@ engine = create_engine(DATABASE_URL)
 # Leer dim_proveedor
 # -----------------------
 
+# dim_proveedor es SCD Tipo 2 (historial reconstruido): varias versiones por CUIT.
+# Linkage AS-WAS: cada adjudicacion apunta a la version del proveedor que estaba
+# vigente EN LA FECHA de esa adjudicacion (no siempre a la vigente actual).
 dim_proveedor = pd.read_sql(
     """
-    SELECT
-        proveedor_id,
-        cuit
+    SELECT proveedor_id, cuit, fecha_desde, fecha_hasta
     FROM dw.dim_proveedor
     """,
     engine
 )
 
 # -----------------------
-# Merge proveedor
+# Merge proveedor (as-was)
 # -----------------------
 
-df = df.merge(
-    dim_proveedor,
-    left_on="CUIT",
-    right_on="cuit",
-    how="left"
+# Fecha completa de la adjudicacion para ubicar la version vigente en esa fecha.
+df["_fadj"] = pd.to_datetime(
+    df["Fecha de Adjudicación"], format="mixed", dayfirst=True, errors="coerce"
+)
+df = df.dropna(subset=["_fadj"])
+
+# merge_asof "backward": por CUIT, toma la version con el mayor fecha_desde <= _fadj,
+# es decir la que estaba vigente en la fecha de la adjudicacion.
+df = pd.merge_asof(
+    df.sort_values("_fadj"),
+    dim_proveedor.sort_values("fecha_desde"),
+    left_on="_fadj",
+    right_on="fecha_desde",
+    left_by="CUIT",
+    right_by="cuit",
+    direction="backward",
 )
 
 print(
@@ -92,6 +104,7 @@ print(
     df[
         [
             "CUIT",
+            "_fadj",
             "proveedor_id"
         ]
     ]

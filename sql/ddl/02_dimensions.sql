@@ -44,15 +44,19 @@ CREATE TABLE dw.dim_procedimiento (
 -- =========================================
 -- DIMENSION: PROVEEDOR
 -- =========================================
+-- SCD Tipo 2: proveedor_id (surrogate) = PK; cuit (business key) NO es unico.
 CREATE TABLE dw.dim_proveedor (
 	proveedor_id serial4 NOT NULL,
 	cuit varchar(20) NULL,
 	razon_social varchar(255) NULL,
 	provincia varchar(100) NULL,
-	CONSTRAINT dim_proveedor_cuit_key UNIQUE (cuit),
+	fecha_desde timestamp NULL,
+	fecha_hasta timestamp NULL,
+	es_vigente bool DEFAULT true NULL,
 	CONSTRAINT dim_proveedor_pkey PRIMARY KEY (proveedor_id)
 );
 CREATE INDEX idx_dim_proveedor_cuit ON dw.dim_proveedor USING btree (cuit);
+CREATE INDEX idx_dim_proveedor_cuit_vigente ON dw.dim_proveedor USING btree (cuit) WHERE es_vigente;
 -- =========================================
 -- DIMENSION: RUBRO
 -- =========================================

@@ -24,13 +24,16 @@ engine = create_engine(DATABASE_URL)
 # Reset DW
 # -----------------------
 
+# NOTA: dw.dim_proveedor NO se trunca a proposito.
+# Es una dimension SCD Tipo 2: su historial (versiones por CUIT) debe
+# sobrevivir a cada rebuild. Su carga es un merge versionado
+# (ver etl/etl_dim_proveedor.py), no truncate + recarga.
 sql = """
 TRUNCATE TABLE
     dw.bridge_adjudicacion_rubro,
     dw.fact_adjudicacion,
     dw.fact_convocatoria,
     dw.dim_rubro,
-    dw.dim_proveedor,
     dw.dim_procedimiento,
     dw.dim_organismo,
     dw.dim_fecha
